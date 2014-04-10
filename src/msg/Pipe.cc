@@ -197,7 +197,9 @@ void Pipe::DelayedDelivery::flush()
     Message *m = delay_queue.front().second;
     delay_queue.pop_front();
     if (pipe->in_q->can_fast_dispatch(m)) {
+      delay_lock.Unlock();
       pipe->in_q->fast_dispatch(m);
+      delay_lock.Lock();
     } else {
       pipe->in_q->enqueue(m, m->get_priority(), pipe->conn_id);
     }
@@ -227,7 +229,9 @@ void *Pipe::DelayedDelivery::entry()
     lgeneric_subdout(pipe->msgr->cct, ms, 10) << pipe->_pipe_prefix(_dout) << "DelayedDelivery::entry dequeuing message " << m << " for delivery, past " << release << dendl;
     delay_queue.pop_front();
     if (pipe->in_q->can_fast_dispatch(m)) {
+      delay_lock.Unlock();
       pipe->in_q->fast_dispatch(m);
+      delay_lock.Lock();
     } else {
       pipe->in_q->enqueue(m, m->get_priority(), pipe->conn_id);
     }
