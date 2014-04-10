@@ -1374,7 +1374,7 @@ private:
 
 protected:
   // -- placement groups --
-  RWLock pg_map_lock;
+  RWLock pg_map_lock; // this lock orders *above* individual PG _locks
   ceph::unordered_map<spg_t, PG*> pg_map; // protected by pg_map lock
   map<spg_t, list<OpRequestRef> > waiting_for_pg; // protected by pg_map lock
 

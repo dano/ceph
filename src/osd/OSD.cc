@@ -1832,10 +1832,9 @@ PG *OSD::_open_lock_pg(
   assert(osd_lock.is_locked());
 
   PG* pg = _make_pg(createmap, pgid);
-  pg->lock(no_lockdep_check);
-
   {
     RWLock::WLocker l(pg_map_lock);
+    pg->lock(no_lockdep_check);
     pg_map[pgid] = pg;
     wake_pg_waiters(pg, pgid);
   }
