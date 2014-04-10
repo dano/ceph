@@ -97,12 +97,14 @@ public:
   RadosTestContext *context;
   TestOpStat *stat;
   bool done;
+  bool need_quiesce;
   TestOp(int n, RadosTestContext *context,
 	 TestOpStat *stat = 0)
     : num(n),
       context(context),
       stat(stat),
-      done(0)
+      done(0),
+      need_quiesce(false)
   {}
 
   virtual ~TestOp() {};
@@ -138,6 +140,7 @@ public:
 
   void begin();
   void finish(CallbackInfo *info);
+  bool must_quiesce_other_ops() { return need_quiesce; }
 };
 
 class TestOpGenerator {
@@ -175,13 +178,15 @@ public:
   const uint64_t max_stride_size;
   AttrGenerator attr_gen;
   const bool no_omap;
-	
+  bool pool_snaps;
+
   RadosTestContext(const string &pool_name, 
 		   int max_in_flight,
 		   uint64_t max_size,
 		   uint64_t min_stride_size,
 		   uint64_t max_stride_size,
 		   bool no_omap,
+		   bool pool_snaps,
 		   const char *id = 0) :
     state_lock("Context Lock"),
     pool_obj_cont(),
@@ -195,7 +200,8 @@ public:
     max_size(max_size), 
     min_stride_size(min_stride_size), max_stride_size(max_stride_size),
     attr_gen(2000),
-    no_omap(no_omap)
+    no_omap(no_omap),
+    pool_snaps(pool_snaps)
   {
   }
 
@@ -242,7 +248,13 @@ public:
     state_lock.Lock();
 
     TestOp *next = gen->next(*this);
+    TestOp *waiting = NULL;
+
     while (next || !inflight.empty()) {
+      if (next && next->must_quiesce_other_ops() && !inflight.empty()) {
+	waiting = next;
+	next = NULL;   // Force to wait for inflight to drain
+      }
       if (next) {
 	inflight.push_back(next);
       }
@@ -270,7 +282,12 @@ public:
 	  break;
 	}
       }
-      next = gen->next(*this);
+      if (waiting) {
+	next = waiting;
+	waiting = NULL;
+      } else {
+	next = gen->next(*this);
+      }
     }
     state_lock.Unlock();
   }
@@ -1155,29 +1172,54 @@ public:
 	       RadosTestContext *context,
 	       TestOpStat *stat = 0)
     : TestOp(n, context, stat)
-  {}
+  { need_quiesce = context->pool_snaps; }
+
+  static int snapname_num;
 
   void _begin()
   {
     uint64_t snap;
-    assert(!context->io_ctx.selfmanaged_snap_create(&snap));
+    string snapname;
+
+    if (context->pool_snaps) {
+      stringstream ss;
+
+      ss << "snap" << ++snapname_num;
+      snapname = ss.str();
+
+      int ret = context->io_ctx.snap_create(snapname.c_str());
+      if (ret) {
+	cerr << "snap_create returned " << ret << std::endl;
+	assert(0);
+      }
+      assert(!context->io_ctx.snap_lookup(snapname.c_str(), &snap));
+
+    } else {
+      assert(!context->io_ctx.selfmanaged_snap_create(&snap));
+    }
 
     context->state_lock.Lock();
     context->add_snap(snap);
 
-    vector<uint64_t> snapset(context->snaps.size());
-    int j = 0;
-    for (map<int,uint64_t>::reverse_iterator i = context->snaps.rbegin();
-	 i != context->snaps.rend();
-	 ++i, ++j) {
-      snapset[j] = i->second;
-    }
+    if (context->pool_snaps) {
+      context->state_lock.Unlock();
+    } else {
+      vector<uint64_t> snapset(context->snaps.size());
 
-    context->state_lock.Unlock();
-    int r = context->io_ctx.selfmanaged_snap_set_write_ctx(context->seq, snapset);
-    if (r) {
-      cerr << "r is " << r << " snapset is " << snapset << " seq is " << context->seq << std::endl;
-      assert(0);
+      int j = 0;
+      for (map<int,uint64_t>::reverse_iterator i = context->snaps.rbegin();
+	   i != context->snaps.rend();
+	   ++i, ++j) {
+	snapset[j] = i->second;
+      }
+
+      context->state_lock.Unlock();
+
+      int r = context->io_ctx.selfmanaged_snap_set_write_ctx(context->seq, snapset);
+      if (r) {
+	cerr << "r is " << r << " snapset is " << snapset << " seq is " << context->seq << std::endl;
+	assert(0);
+      }
     }
   }
 
@@ -1204,20 +1246,27 @@ public:
     context->remove_snap(to_remove);
     context->state_lock.Unlock();
 
-    assert(!context->io_ctx.selfmanaged_snap_remove(snap));
+    if (context->pool_snaps) {
+      string snapname;
 
-    vector<uint64_t> snapset(context->snaps.size());
-    int j = 0;
-    for (map<int,uint64_t>::reverse_iterator i = context->snaps.rbegin();
-	 i != context->snaps.rend();
-	 ++i, ++j) {
-      snapset[j] = i->second;
-    }
+      assert(!context->io_ctx.snap_get_name(snap, &snapname));
+      assert(!context->io_ctx.snap_remove(snapname.c_str()));
+     } else {
+      assert(!context->io_ctx.selfmanaged_snap_remove(snap));
 
-    int r = context->io_ctx.selfmanaged_snap_set_write_ctx(context->seq, snapset);
-    if (r) {
-      cerr << "r is " << r << " snapset is " << snapset << " seq is " << context->seq << std::endl;
-      assert(0);
+      vector<uint64_t> snapset(context->snaps.size());
+      int j = 0;
+      for (map<int,uint64_t>::reverse_iterator i = context->snaps.rbegin();
+	   i != context->snaps.rend();
+	   ++i, ++j) {
+	snapset[j] = i->second;
+      }
+
+      int r = context->io_ctx.selfmanaged_snap_set_write_ctx(context->seq, snapset);
+      if (r) {
+	cerr << "r is " << r << " snapset is " << snapset << " seq is " << context->seq << std::endl;
+	assert(0);
+      }
     }
   }
 
@@ -1341,7 +1390,11 @@ public:
 
     context->state_lock.Unlock();
 
-    op.selfmanaged_snap_rollback(snap);
+    if (context->pool_snaps) {
+      op.rollback(snap);
+    } else {
+      op.selfmanaged_snap_rollback(snap);
+    }
 
     pair<TestOp*, TestOp::CallbackInfo*> *cb_arg =
       new pair<TestOp*, TestOp::CallbackInfo*>(this,
