@@ -2037,7 +2037,6 @@ PG *OSD::_lookup_pg(spg_t pgid)
 PG *OSD::_lookup_lock_pg_with_map_lock_held(spg_t pgid)
 {
   assert(osd_lock.is_locked());
-  RWLock::RLocker l(pg_map_lock);
   assert(pg_map.count(pgid));
   PG *pg = pg_map[pgid];
   pg->lock();
@@ -7122,7 +7121,7 @@ void OSD::handle_pg_query(OpRequestRef op)
       RWLock::RLocker l(pg_map_lock);
       if (pg_map.count(pgid)) {
         PG *pg = 0;
-        pg = _lookup_lock_pg(pgid);
+        pg = _lookup_lock_pg_with_map_lock_held(pgid);
         pg->queue_query(
             it->second.epoch_sent, it->second.epoch_sent,
             pg_shard_t(from, it->second.from), it->second);
@@ -7218,7 +7217,7 @@ void OSD::handle_pg_remove(OpRequestRef op)
       continue;
     }
     dout(5) << "queue_pg_for_deletion: " << pgid << dendl;
-    PG *pg = _lookup_lock_pg(pgid);
+    PG *pg = _lookup_lock_pg_with_map_lock_held(pgid);
     pg_history_t history = pg->info.history;
     int up_primary, acting_primary;
     vector<int> up, acting;
