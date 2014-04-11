@@ -25,6 +25,7 @@ void JournalingObjectStore::journal_stop()
     delete journal;
     journal = 0;
   }
+  apply_manager.reset();
 }
 
 int JournalingObjectStore::journal_replay(uint64_t fs_op_seq)
@@ -98,7 +99,9 @@ int JournalingObjectStore::journal_replay(uint64_t fs_op_seq)
   submit_manager.set_op_seq(op_seq);
 
   // done reading, make writeable.
-  journal->make_writeable();
+  err = journal->make_writeable();
+  if (err < 0)
+    return err;
 
   return count;
 }

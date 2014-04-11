@@ -15,6 +15,8 @@
 #ifndef CEPH_PG_H
 #define CEPH_PG_H
 
+#define PG_DEBUG_REFS
+
 #include <boost/statechart/custom_reaction.hpp>
 #include <boost/statechart/event.hpp>
 #include <boost/statechart/simple_state.hpp>
@@ -678,7 +680,7 @@ protected:
   void clear_publish_stats();
 
 public:
-  void clear_primary_state(bool stay_primary);
+  void clear_primary_state();
 
  public:
   bool is_actingbackfill(pg_shard_t osd) const {
@@ -719,7 +721,7 @@ public:
 
   bool calc_min_last_complete_ondisk() {
     eversion_t min = last_complete_ondisk;
-    assert(actingbackfill.size() > 0);
+    assert(!actingbackfill.empty());
     for (set<pg_shard_t>::iterator i = actingbackfill.begin();
 	 i != actingbackfill.end();
 	 ++i) {
@@ -1650,6 +1652,7 @@ public:
     struct RepRecovering : boost::statechart::state< RepRecovering, ReplicaActive >, NamedState {
       typedef boost::mpl::list<
 	boost::statechart::transition< RecoveryDone, RepNotRecovering >,
+	boost::statechart::transition< RemoteReservationRejected, RepNotRecovering >,
 	boost::statechart::custom_reaction< BackfillTooFull >
 	> reactions;
       RepRecovering(my_context ctx);
@@ -1795,7 +1798,6 @@ public:
     };
 
     struct WaitUpThru;
-    struct WaitFlushedPeering;
 
     struct GetMissing : boost::statechart::state< GetMissing, Peering >, NamedState {
       set<pg_shard_t> peer_missing_requested;
@@ -1806,23 +1808,10 @@ public:
       typedef boost::mpl::list <
 	boost::statechart::custom_reaction< QueryState >,
 	boost::statechart::custom_reaction< MLogRec >,
-	boost::statechart::transition< NeedUpThru, WaitUpThru >,
-	boost::statechart::transition< CheckRepops, WaitFlushedPeering>
+	boost::statechart::transition< NeedUpThru, WaitUpThru >
 	> reactions;
       boost::statechart::result react(const QueryState& q);
       boost::statechart::result react(const MLogRec& logevt);
-    };
-
-    struct WaitFlushedPeering :
-      boost::statechart::state< WaitFlushedPeering, Peering>, NamedState {
-      WaitFlushedPeering(my_context ctx);
-      void exit() {}
-      typedef boost::mpl::list <
-	boost::statechart::custom_reaction< QueryState >,
-	boost::statechart::custom_reaction< FlushedEvt >
-      > reactions;
-      boost::statechart::result react(const FlushedEvt& evt);
-      boost::statechart::result react(const QueryState& q);
     };
 
     struct WaitUpThru : boost::statechart::state< WaitUpThru, Peering >, NamedState {
@@ -1832,7 +1821,6 @@ public:
       typedef boost::mpl::list <
 	boost::statechart::custom_reaction< QueryState >,
 	boost::statechart::custom_reaction< ActMap >,
-	boost::statechart::transition< CheckRepops, WaitFlushedPeering>,
 	boost::statechart::custom_reaction< MLogRec >
 	> reactions;
       boost::statechart::result react(const QueryState& q);
@@ -2013,7 +2001,7 @@ public:
     vector<pg_log_entry_t> &log_entries,
     ObjectStore::Transaction& t);
 
-  void filter_snapc(SnapContext& snapc);
+  void filter_snapc(vector<snapid_t> &snaps);
 
   void log_weirdness();
 
@@ -2120,10 +2108,6 @@ public:
 
   virtual int do_command(cmdmap_t cmdmap, ostream& ss,
 			 bufferlist& idata, bufferlist& odata) = 0;
-
-  virtual bool same_for_read_since(epoch_t e) = 0;
-  virtual bool same_for_modify_since(epoch_t e) = 0;
-  virtual bool same_for_rep_modify_since(epoch_t e) = 0;
 
   virtual void on_role_change() = 0;
   virtual void on_pool_change() = 0;
