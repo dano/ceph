@@ -2,9 +2,9 @@
 This module is a thin wrapper around libcephfs.
 """
 from ctypes import CDLL, c_char_p, c_size_t, c_void_p, c_int, c_long, c_uint, c_ulong, \
-    create_string_buffer, byref, Structure
-from ctypes.util import find_library
+    create_string_buffer, byref, Structure, sizeof
 import errno
+from contextlib import contextmanager
 
 class Error(Exception):
     pass
@@ -115,21 +115,6 @@ class cephfs_stat(Structure):
                 ('__unused2', c_long),
                 ('__unused3', c_long) ]
 
-def load_libcephfs():
-    """
-    Load the libcephfs shared library.
-    """
-    libcephfs_path = find_library('cephfs')
-    if libcephfs_path:
-        return CDLL(libcephfs_path)
-
-    # try harder, find_library() doesn't search LD_LIBRARY_PATH
-    # in addition, it doesn't seem work on centos 6.4 (see e46d2ca067b5)
-    try:
-        return CDLL('libcephfs.so.1')
-    except OSError as e:
-        raise EnvironmentError("Unable to load libcephfs: %s" % e)
-
 class LibCephFS(object):
     """libcephfs python wrapper"""
     def require_state(self, *args):
@@ -140,7 +125,7 @@ class LibCephFS(object):
                                   "CephFS object in state %s." % (self.state))
 
     def __init__(self, conf=None, conffile=None):
-        self.libcephfs = load_libcephfs()
+        self.libcephfs = CDLL('libcephfs.so.1')
         self.cluster = c_void_p()
 
         if conffile is not None and not isinstance(conffile, str):
@@ -173,16 +158,35 @@ class LibCephFS(object):
             self.libcephfs.ceph_shutdown(self.cluster)
             self.state = "shutdown"
 
+    def unmount(self):
+        """
+        Unmount the ceph mount handle
+        """
+        if self.state == "mounted":
+            self.libcephfs.ceph_unmount(self.cluster)
+            self.state = "configuring"
+
+    def release(self):
+        """
+        Destroy the ceph mount handle
+        """
+        if self.state == "configuring":
+            self.libcephfs.ceph_release(self.cluster)
+            self.state = "released"
+
+
     def __enter__(self):
         self.mount()
         return self
 
     def __exit__(self, type_, value, traceback):
-        self.shutdown()
+        self.unmount()
+        self.release()
         return False
 
     def __del__(self):
-        self.shutdown()
+        self.unmount()
+        self.release()
 
     def version(self):
         """
@@ -275,15 +279,56 @@ class LibCephFS(object):
         if ret < 0:
             raise make_ex(ret, "error in mkdir '%s'" % path)
 
+    @contextmanager
+    def _opendir(self, dirname):
+        opened_dir = c_void_p()
+        ret = self.libcephfs.ceph_opendir(self.cluster, c_char_p(dirname), 
+                                          byref(opened_dir))
+        if ret < 0:
+            raise make_ex(ret, "opendir failed")
+        try:
+            yield opened_dir
+        finally:
+            self.libcephfs.ceph_closedir(self.cluster, opened_dir)
+
+    def listdir(self, dirname):
+        self.require_state("mounted")
+        if not isinstance(dirname, str):
+            raise TypeError("dirname must be a string")
+        with self._opendir(dirname) as opened_dir:
+            length = 60
+            master_dirs = []
+            while True:
+                ret_buf = create_string_buffer(length)
+                ret = self.libcephfs.ceph_getdnames(self.cluster, opened_dir, 
+                                                    ret_buf, c_size_t(length))
+                if ret == 0:  # Nothing left to read.
+                    break
+                elif ret == -errno.ERANGE:
+                    length *= 2
+                elif ret < 0:
+                    raise make_ex(ret, "error calling getdnames: %s" % ret)
+                master_dirs.extend([i for i in ret_buf.raw.split('\x00') 
+                                        if i and i not in ('.', '..')])
+            return master_dirs
+
     def mkdirs(self, path, mode):
         self.require_state("mounted")
         if not isinstance(path, str):
             raise TypeError('path must be a string')
         if not isinstance(mode, int):
             raise TypeError('mode must be an int')
-        ret = self.libcephfs.ceph_mkdir(self.cluster, c_char_p(path), c_int(mode))
+        ret = self.libcephfs.ceph_mkdirs(self.cluster, c_char_p(path), c_int(mode))
         if ret < 0:
             raise make_ex(ret, "error in mkdirs '%s'" % path)
+
+    def rmdir(self, path):
+        self.require_state("mounted")
+        if not isinstance(path, str):
+            raise TypeError("Path must be a string")
+        ret = self.libcephfs.ceph_rmdir(self.cluster, c_char_p(path))
+        if ret < 0:
+            raise make_ex(ret, "error in rmdir '%s'" % path)
 
     def open(self, path, flags, mode):
         self.require_state("mounted")
